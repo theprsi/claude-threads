@@ -11,7 +11,7 @@ import { handleMessage, type MessageHandlerOptions } from './message-handler.js'
 import type { PlatformClient, PlatformPost, PlatformUser } from './platform/index.js';
 import type { SessionManager } from './session/index.js';
 import { createMockFormatter } from './test-utils/mock-formatter.js';
-import { _resetResumeRefusalState } from './utils/loop-safety.js';
+import { _resetResumeRefusalState, isBotStatusPost } from './utils/loop-safety.js';
 
 // Create mock platform client
 function createMockPlatform(botName = 'claude-bot') {
@@ -2402,6 +2402,79 @@ describe('loop safety (#491)', () => {
       expect(postedMessages()).toEqual([
         '⚠️ `bot-b` is not authorized to resume this session',
         '⚠️ `bot-c` is not authorized to resume this session',
+      ]);
+    });
+  });
+
+  describe('the guard and the emitters agree', () => {
+    // The status templates are literals in loop-safety.ts, copied from the emit
+    // sites. For the two refusals that actually caused #491 that copy is pinned
+    // here by round-tripping the REAL posted string back through the matcher:
+    // reword either side and this fails, instead of the loop silently reopening.
+    test('the resume refusal this bot emits is recognized as a status post', async () => {
+      (session.registry.getPersistedByThreadId as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+      (session.getPersistedSession as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+
+      await handleMessage(client, session, makePost('continue'), botB, options);
+
+      const emitted = postedMessages()[0];
+      expect(emitted).toBeDefined();
+      expect(isBotStatusPost(emitted)).toBe(true);
+    });
+
+    test('the new-session refusal this bot emits is recognized as a status post', async () => {
+      await handleMessage(client, session, makePost('@claude-bot help', ''), botB, options);
+
+      const emitted = postedMessages()[0];
+      expect(emitted).toBeDefined();
+      expect(isBotStatusPost(emitted)).toBe(true);
+    });
+
+    test('the !kill refusal this bot emits is recognized as a status post', async () => {
+      await handleMessage(client, session, makePost('!kill', ''), botB, options);
+
+      const emitted = postedMessages()[0];
+      expect(emitted).toBeDefined();
+      expect(isBotStatusPost(emitted)).toBe(true);
+    });
+  });
+
+  describe('operational behaviour', () => {
+    test('a dropped status post is logged rather than vanishing silently', async () => {
+      (session.registry.findByThreadId as any).mockReturnValue({ sessionId: 'test:thread1' });
+      const debug = mock((_message: string) => {});
+      options = { platformId: 'test-platform', logger: { error: mock(() => {}), debug } };
+
+      await handleMessage(
+        client,
+        session,
+        makePost('⚠️ `bot-b` is not authorized to resume this session'),
+        botB,
+        options,
+      );
+
+      expect(debug).toHaveBeenCalled();
+      expect(debug.mock.calls[0][0]).toContain('loop-safety');
+    });
+
+    test('a failed refusal post does not open the suppression window', async () => {
+      // Recording before the post would silence a legitimate user for the whole
+      // window on one transient platform error, with nothing posted.
+      (session.registry.getPersistedByThreadId as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+      (session.getPersistedSession as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+      (client.createPost as ReturnType<typeof mock>).mockImplementationOnce(() => {
+        throw new Error('platform 503');
+      });
+
+      await handleMessage(client, session, makePost('continue'), botB, options);
+      await handleMessage(client, session, makePost('continue'), botB, options);
+
+      // Two refusal ATTEMPTS: the first threw, so the window never opened and
+      // the retry is allowed through. Recording before the post would have left
+      // the user with no refusal at all for the next ten minutes.
+      expect(postedMessages().filter((m) => m.includes('not authorized'))).toEqual([
+        '⚠️ `bot-b` is not authorized to resume this session',
+        '⚠️ `bot-b` is not authorized to resume this session',
       ]);
     });
   });

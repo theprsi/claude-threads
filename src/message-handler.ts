@@ -21,7 +21,7 @@ import { logSilentError } from './utils/error-handler/index.js';
 import { dcmThreadId, isDcmThreadId, resolveAckReaction, resolveApprovals, resolveDirectChannelMode, type DirectChannelModeConfig } from './platform/utils.js';
 import { auditLog } from './persistence/audit-log.js';
 import { createLogger } from './utils/logger.js';
-import { isBotStatusPost, shouldPostResumeRefusal } from './utils/loop-safety.js';
+import { isBotStatusPost, shouldPostResumeRefusal, recordResumeRefusal } from './utils/loop-safety.js';
 
 const ackLog = createLogger('ack');
 
@@ -94,7 +94,14 @@ export async function handleMessage(
   // dropped. It is `!== false` rather than `=== true` on purpose — when the
   // author cannot be identified at all the loop hazard wins, since dropping a
   // machine-shaped message costs one post and letting it through costs a loop.
-  if (isBotStatusPost(post.message) && user?.isBot !== false) return;
+  if (isBotStatusPost(post.message) && user?.isBot !== false) {
+    // Never silent: every other drop path nearby is logged, and a user whose
+    // message was dropped deserves an explanation in the log.
+    options.logger?.debug?.(
+      `loop-safety: dropped a status-shaped post from ${user?.username ?? 'an unidentified author'} in ${post.rootId || post.id}`,
+    );
+    return;
+  }
 
   const { platformId, logger, onKill } = options;
   const dcm = resolveDirectChannelMode(options.directChannelMode);
@@ -325,6 +332,7 @@ export async function handleMessage(
               `⚠️ ${formatter.formatCode(username)} is not authorized to resume this session`,
               threadRoot
             );
+            recordResumeRefusal(threadRoot, username);
           }
           return;
         }

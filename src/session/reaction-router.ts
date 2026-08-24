@@ -42,7 +42,7 @@ import * as commands from '../operations/commands/index.js';
 import * as worktreeModule from '../operations/worktree/index.js';
 import * as contextPrompt from '../operations/context-prompt/index.js';
 import { createLogger } from '../utils/logger.js';
-import { shouldPostResumeRefusal } from '../utils/loop-safety.js';
+import { shouldPostResumeRefusal, recordResumeRefusal } from '../utils/loop-safety.js';
 
 const log = createLogger('manager');
 
@@ -178,6 +178,7 @@ async function tryResumeFromReaction(
         `⚠️ ${fmt.formatCode(username)} is not authorized to resume this session`,
         persistedSession.threadId,
       );
+      recordResumeRefusal(persistedSession.threadId, username);
     }
     return false;
   }

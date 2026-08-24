@@ -11,8 +11,21 @@ import { describe, test, expect, beforeEach } from 'bun:test';
 import {
   isBotStatusPost,
   shouldPostResumeRefusal,
+  recordResumeRefusal,
   _resetResumeRefusalState,
 } from './loop-safety.js';
+
+/** The production sequence: ask, then record only once the post landed. */
+function refuse(threadId: string, username: string, now?: number): boolean {
+  const allowed = now === undefined
+    ? shouldPostResumeRefusal(threadId, username)
+    : shouldPostResumeRefusal(threadId, username, now);
+  if (allowed) {
+    if (now === undefined) recordResumeRefusal(threadId, username);
+    else recordResumeRefusal(threadId, username, now);
+  }
+  return allowed;
+}
 
 describe('isBotStatusPost', () => {
   describe('recognizes claude-threads own status posts', () => {
@@ -80,43 +93,52 @@ describe('isBotStatusPost', () => {
   });
 });
 
-describe('shouldPostResumeRefusal', () => {
+describe('shouldPostResumeRefusal / recordResumeRefusal', () => {
   beforeEach(() => {
     _resetResumeRefusalState();
   });
 
   test('allows the first refusal for a (thread, user) pair', () => {
+    expect(refuse('thread1', 'bot-b')).toBe(true);
+  });
+
+  test('the check alone does not open the window — only recording does', () => {
+    // A refusal whose post throws must not silence the pair; the call sites
+    // record after the await for exactly this reason.
     expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(true);
+    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(true);
+    recordResumeRefusal('thread1', 'bot-b');
+    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(false);
   });
 
   test('suppresses a repeat inside the window', () => {
-    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(true);
-    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(false);
-    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(false);
+    expect(refuse('thread1', 'bot-b')).toBe(true);
+    expect(refuse('thread1', 'bot-b')).toBe(false);
+    expect(refuse('thread1', 'bot-b')).toBe(false);
   });
 
   test('allows one again after the window has passed', () => {
     const t0 = 1_700_000_000_000;
-    expect(shouldPostResumeRefusal('thread1', 'bot-b', t0)).toBe(true);
-    expect(shouldPostResumeRefusal('thread1', 'bot-b', t0 + 9 * 60_000)).toBe(false);
+    expect(refuse('thread1', 'bot-b', t0)).toBe(true);
+    expect(refuse('thread1', 'bot-b', t0 + 9 * 60_000)).toBe(false);
     // A human who wanders back later must still be told why nothing happened.
-    expect(shouldPostResumeRefusal('thread1', 'bot-b', t0 + 11 * 60_000)).toBe(true);
+    expect(refuse('thread1', 'bot-b', t0 + 11 * 60_000)).toBe(true);
   });
 
   test('scopes the window per thread and per user', () => {
-    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(true);
-    expect(shouldPostResumeRefusal('thread2', 'bot-b')).toBe(true);
-    expect(shouldPostResumeRefusal('thread1', 'alice')).toBe(true);
-    expect(shouldPostResumeRefusal('thread1', 'bot-b')).toBe(false);
+    expect(refuse('thread1', 'bot-b')).toBe(true);
+    expect(refuse('thread2', 'bot-b')).toBe(true);
+    expect(refuse('thread1', 'alice')).toBe(true);
+    expect(refuse('thread1', 'bot-b')).toBe(false);
   });
 
   test('stays bounded under a flood that never idles out of the window', () => {
     const t0 = 1_700_000_000_000;
     for (let i = 0; i < 2000; i++) {
-      expect(shouldPostResumeRefusal(`thread${i}`, 'bot-b', t0)).toBe(true);
+      expect(refuse(`thread${i}`, 'bot-b', t0)).toBe(true);
     }
     // The oldest keys are evicted, so the very first pair is allowed again —
     // the point is that the map cannot grow without limit.
-    expect(shouldPostResumeRefusal('thread0', 'bot-b', t0)).toBe(true);
+    expect(refuse('thread0', 'bot-b', t0)).toBe(true);
   });
 });

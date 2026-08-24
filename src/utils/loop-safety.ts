@@ -13,7 +13,8 @@
  *
  * 2. `shouldPostResumeRefusal` — the "not authorized to resume this session"
  *    refusal carries the same information every time, so it is posted at most
- *    once per (thread, user) per 10 minutes. A loop firing seconds apart goes
+ *    once per (thread, user) per 10 minutes, and only once it has actually
+ *    been posted. A loop firing seconds apart goes
  *    quiet; a human who wanders back later is still told why nothing happened.
  *    State is in-memory only by design — a restart forgetting refusal
  *    timestamps is harmless.
@@ -74,7 +75,9 @@ const resumeRefusalPostedAt = new Map<string, number>();
  * Whether the "not authorized to resume this session" refusal should be posted
  * for this (thread, user) pair, or suppressed as a repeat.
  *
- * Calling this *records* the refusal, so call it only where the post follows.
+ * Pure — it does not open the window. Call `recordResumeRefusal` *after* the
+ * post succeeds, so a transient platform failure doesn't silence a legitimate
+ * user for the rest of the window with nothing posted.
  *
  * @param now - epoch ms; injectable so tests can step past the window without
  *              sleeping. Production callers omit it.
@@ -87,18 +90,22 @@ export function shouldPostResumeRefusal(
   for (const [seen, postedAt] of resumeRefusalPostedAt) {
     if (now - postedAt > RESUME_REFUSAL_WINDOW_MS) resumeRefusalPostedAt.delete(seen);
   }
+  return !resumeRefusalPostedAt.has(`${threadId}:${username}`);
+}
 
-  const key = `${threadId}:${username}`;
-  if (resumeRefusalPostedAt.has(key)) return false;
-
-  resumeRefusalPostedAt.set(key, now);
+/** Open the suppression window for a refusal that was actually posted. */
+export function recordResumeRefusal(
+  threadId: string,
+  username: string,
+  now: number = Date.now(),
+): void {
+  resumeRefusalPostedAt.set(`${threadId}:${username}`, now);
   // Map iteration is insertion-ordered, so this drops the oldest entry.
   while (resumeRefusalPostedAt.size > RESUME_REFUSAL_MAX_ENTRIES) {
     const oldest = resumeRefusalPostedAt.keys().next();
     if (oldest.done) break;
     resumeRefusalPostedAt.delete(oldest.value);
   }
-  return true;
 }
 
 /** Test seam: clear the in-memory refusal window between tests. */
