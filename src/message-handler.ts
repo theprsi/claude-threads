@@ -21,6 +21,7 @@ import { logSilentError } from './utils/error-handler/index.js';
 import { dcmThreadId, isDcmThreadId, resolveAckReaction, resolveApprovals, resolveDirectChannelMode, type DirectChannelModeConfig } from './platform/utils.js';
 import { auditLog } from './persistence/audit-log.js';
 import { createLogger } from './utils/logger.js';
+import { isBotStatusPost, shouldPostResumeRefusal } from './utils/loop-safety.js';
 
 const ackLog = createLogger('ack');
 
@@ -84,6 +85,11 @@ export async function handleMessage(
   user: PlatformUser | null,
   options: MessageHandlerOptions
 ): Promise<void> {
+  // Loop safety (#491): claude-threads' own status posts are machine output,
+  // never a request. Treating one as a wake-up is how two bots in the same
+  // channel end up talking to each other indefinitely.
+  if (isBotStatusPost(post.message)) return;
+
   const { platformId, logger, onKill } = options;
   const dcm = resolveDirectChannelMode(options.directChannelMode);
   const username = user?.username || 'unknown';
@@ -302,11 +308,18 @@ export async function handleMessage(
         const ownerScoped =
           resolveApprovals(client.approvals, isDcmThreadId(threadRoot)) === 'owner';
         if (!allowedUsers.has(username) && (ownerScoped || !client.isUserAllowed(username))) {
-          // Not allowed - could request approval but that would require the session to be active
-          await client.createPost(
-            `⚠️ ${formatter.formatUserMention(username)} is not authorized to resume this session`,
-            threadRoot
-          );
+          // Not allowed - could request approval but that would require the session to be active.
+          // Loop safety (#491): name the user in code formatting, not as an
+          // @mention — a refusal whose purpose is "stop talking to me" must not
+          // be written in the one form that wakes the recipient. And post it at
+          // most once per (thread, user) per window, since it is the same
+          // information every time.
+          if (shouldPostResumeRefusal(threadRoot, username)) {
+            await client.createPost(
+              `⚠️ ${formatter.formatCode(username)} is not authorized to resume this session`,
+              threadRoot
+            );
+          }
           return;
         }
       }
@@ -339,7 +352,7 @@ export async function handleMessage(
     if (mentionRequired && !client.isBotMentioned(message)) return;
 
     if (!client.isUserAllowed(username)) {
-      await client.createPost(`⚠️ ${formatter.formatUserMention(username)} is not authorized`, threadRoot);
+      await client.createPost(`⚠️ ${formatter.formatCode(username)} is not authorized`, threadRoot);
       return;
     }
 

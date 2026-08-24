@@ -14,7 +14,7 @@
  * that `handleReaction` presents to platform clients.
  */
 
-import { describe, test, expect, mock } from 'bun:test';
+import { describe, test, expect, beforeEach, mock } from 'bun:test';
 import { handleReaction, type ReactionRouterDeps } from './reaction-router.js';
 import type { Session } from './types.js';
 import type { PlatformClient } from '../platform/index.js';
@@ -23,6 +23,8 @@ import type { SessionStore } from '../persistence/session-store.js';
 import type { ResolvedLimits } from '../config/index.js';
 import type { SessionContext } from '../operations/session-context/index.js';
 import type { ContextPromptHandler } from '../operations/context-prompt/index.js';
+import { createMockFormatter } from '../test-utils/mock-formatter.js';
+import { _resetResumeRefusalState } from '../utils/loop-safety.js';
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -73,6 +75,12 @@ function makeDeps(
     ...overrides,
   };
 }
+
+// Loop safety (#491) keeps an in-memory refusal window; clear it so tests
+// don't suppress each other's refusal posts.
+beforeEach(() => {
+  _resetResumeRefusalState();
+});
 
 describe('ReactionRouter.handleReaction', () => {
   describe('no session', () => {
@@ -144,10 +152,11 @@ describe('ReactionRouter.handleReaction', () => {
     }
 
     test('rejects an unauthorized resumer with a not-authorized post', async () => {
-      const createPost = mock(() => Promise.resolve({ id: 'p' }));
+      const createPost = mock((_message: string, _threadId: string) => Promise.resolve({ id: 'p' }));
       const platform = {
         isUserAllowed: mock((u: string) => u === 'alice'),
         createPost,
+        getFormatter: mock(() => createMockFormatter()),
       } as unknown as PlatformClient;
       const deps = makeDeps(null, {
         sessionStore: {
@@ -160,10 +169,36 @@ describe('ReactionRouter.handleReaction', () => {
 
       // mallory is in neither the persisted session allowlist nor the platform
       // allowlist, so the resume is refused and the rejection is posted.
+      // Loop safety (#491): the refusal names mallory in code formatting — a
+      // refusal that @-mentions its recipient is what wakes the next bot.
       expect(createPost).toHaveBeenCalledWith(
-        expect.stringContaining('not authorized'),
+        '⚠️ `mallory` is not authorized to resume this session',
         'thread-paused',
       );
+      expect(createPost.mock.calls[0][0]).not.toContain('@mallory');
+    });
+
+    test('posts the resume refusal at most once per (thread, user) per window (#491)', async () => {
+      const createPost = mock(() => Promise.resolve({ id: 'p' }));
+      const platform = {
+        isUserAllowed: mock((u: string) => u === 'alice'),
+        createPost,
+        getFormatter: mock(() => createMockFormatter()),
+      } as unknown as PlatformClient;
+      const deps = makeDeps(null, {
+        sessionStore: {
+          findByPostId: mock(() => persistedFixture()),
+        } as unknown as SessionStore,
+        platforms: new Map([['test', platform]]),
+      });
+
+      for (let i = 0; i < 5; i++) {
+        await handleReaction(deps, 'test', 'header-post', 'arrows_counterclockwise', 'mallory', 'added');
+      }
+
+      // Five refused attempts, one refusal post: a loop firing seconds apart
+      // goes quiet instead of answering every time.
+      expect(createPost.mock.calls.length).toBe(1);
     });
 
     test('lets the session owner past the resume gate (no rejection post)', async () => {
@@ -171,7 +206,7 @@ describe('ReactionRouter.handleReaction', () => {
       const platform = {
         isUserAllowed: mock((u: string) => u === 'alice'),
         createPost,
-        getFormatter: mock(() => ({ formatBold: (s: string) => s })),
+        getFormatter: mock(() => createMockFormatter()),
       } as unknown as PlatformClient;
       // registry.size >= maxSessions would trip the capacity guard; keep it 0.
       const deps = makeDeps(null, {
@@ -236,7 +271,7 @@ describe('DCM approvals scoping (reaction gate)', () => {
     const platform = {
       isUserAllowed: mock(() => true), // bob is platform-allowed…
       createPost,
-      getFormatter: mock(() => ({ formatBold: (t: string) => t })),
+      getFormatter: mock(() => createMockFormatter()),
       directChannelMode: { enabled: true, respondTo: 'all_messages' },
     } as unknown as PlatformClient;
     const deps = makeDeps(null, {
@@ -253,9 +288,10 @@ describe('DCM approvals scoping (reaction gate)', () => {
 
     await handleReaction(deps, 'test', 'header-post', 'arrows_counterclockwise', 'bob', 'added');
 
-    // …but not a session participant: the DCM owner scoping rejects the resume.
+    // …but not a session participant: the DCM owner scoping rejects the resume,
+    // naming bob in code formatting rather than as an @mention (#491).
     expect(createPost).toHaveBeenCalledWith(
-      expect.stringContaining('not authorized'),
+      '⚠️ `bob` is not authorized to resume this session',
       'dcm:test',
     );
   });

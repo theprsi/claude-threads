@@ -11,6 +11,7 @@ import { handleMessage, type MessageHandlerOptions } from './message-handler.js'
 import type { PlatformClient, PlatformPost, PlatformUser } from './platform/index.js';
 import type { SessionManager } from './session/index.js';
 import { createMockFormatter } from './test-utils/mock-formatter.js';
+import { _resetResumeRefusalState } from './utils/loop-safety.js';
 
 // Create mock platform client
 function createMockPlatform(botName = 'claude-bot') {
@@ -95,6 +96,9 @@ describe('handleMessage', () => {
   let options: MessageHandlerOptions;
 
   beforeEach(() => {
+    // Loop safety (#491) keeps an in-memory refusal window; clear it so tests
+    // don't suppress each other's refusal posts.
+    _resetResumeRefusalState();
     client = createMockPlatform();
     session = createMockSessionManager();
     options = {
@@ -2238,4 +2242,140 @@ describe('direct channel mode (DCM)', () => {
     expect(session.sendFollowUp).not.toHaveBeenCalled();
   });
 
+});
+
+describe('loop safety (#491)', () => {
+  let client: PlatformClient & { posts: Map<string, string> };
+  let session: ReturnType<typeof createMockSessionManager>;
+  let options: MessageHandlerOptions;
+
+  const human: PlatformUser = { id: 'user1', username: 'allowed-user', displayName: 'User' };
+  const botB: PlatformUser = { id: 'user2', username: 'bot-b', displayName: 'Bot B' };
+
+  function makePost(message: string, rootId = 'thread1'): PlatformPost {
+    return {
+      id: 'post1',
+      platformId: 'test',
+      channelId: 'channel1',
+      userId: 'user1',
+      message,
+      rootId,
+      createAt: Date.now(),
+    };
+  }
+
+  function postedMessages(): string[] {
+    return (client.createPost as ReturnType<typeof mock>).mock.calls.map((call) => call[0] as string);
+  }
+
+  beforeEach(() => {
+    _resetResumeRefusalState();
+    client = createMockPlatform();
+    session = createMockSessionManager();
+    options = { platformId: 'test-platform' };
+  });
+
+  describe("fix 3 - the bot's own status posts never wake a session", () => {
+    beforeEach(() => {
+      (session.registry.findByThreadId as any).mockReturnValue({ sessionId: 'test:thread1' });
+    });
+
+    test('drops a verbatim resume refusal posted by another bot', async () => {
+      await handleMessage(
+        client,
+        session,
+        makePost('⚠️ `bot-b` is not authorized to resume this session'),
+        botB,
+        options,
+      );
+
+      expect(session.sendFollowUp).not.toHaveBeenCalled();
+      expect(client.createPost).not.toHaveBeenCalled();
+    });
+
+    test('drops a verbatim session-timeout notice posted by another bot', async () => {
+      await handleMessage(
+        client,
+        session,
+        makePost(
+          '⏱️ **Session timed out** after 30 minutes of inactivity\n\n💡 React with 🔄 to resume, or send a new message to continue.',
+        ),
+        botB,
+        options,
+      );
+
+      expect(session.sendFollowUp).not.toHaveBeenCalled();
+    });
+
+    test('a human message that merely starts with the warning emoji still gets through', async () => {
+      const message = '⚠️ careful, the migration is not authorized yet — can you check?';
+
+      await handleMessage(client, session, makePost(message), human, options);
+
+      expect(session.sendFollowUp).toHaveBeenCalledWith(
+        'thread1', message, undefined, 'allowed-user', 'User',
+      );
+    });
+
+    test('a human quoting a status post to ask about it still gets through', async () => {
+      const message = '> ⚠️ `bot-b` is not authorized to resume this session\n\nwhy did this happen?';
+
+      await handleMessage(client, session, makePost(message), human, options);
+
+      expect(session.sendFollowUp).toHaveBeenCalledWith(
+        'thread1', message, undefined, 'allowed-user', 'User',
+      );
+    });
+  });
+
+  describe('fix 1 - refusals name the user without @-mentioning them', () => {
+    test('the paused-session resume refusal uses code formatting', async () => {
+      (session.registry.getPersistedByThreadId as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+      (session.getPersistedSession as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+
+      await handleMessage(client, session, makePost('continue'), botB, options);
+
+      expect(postedMessages()).toEqual(['⚠️ `bot-b` is not authorized to resume this session']);
+      expect(postedMessages()[0]).not.toContain('@bot-b');
+    });
+
+    test('the new-session authorization refusal uses code formatting', async () => {
+      await handleMessage(client, session, makePost('@claude-bot help', ''), botB, options);
+
+      expect(postedMessages()).toEqual(['⚠️ `bot-b` is not authorized']);
+      expect(postedMessages()[0]).not.toContain('@bot-b');
+    });
+  });
+
+  describe('fix 2 - the resume refusal is rate-limited per (thread, user)', () => {
+    beforeEach(() => {
+      (session.registry.getPersistedByThreadId as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+      (session.getPersistedSession as any).mockReturnValue({ sessionAllowedUsers: ['alice'] });
+    });
+
+    test('posts once and suppresses the repeats that make a loop', async () => {
+      for (let i = 0; i < 5; i++) {
+        await handleMessage(client, session, makePost('continue'), botB, options);
+      }
+
+      expect(postedMessages()).toEqual(['⚠️ `bot-b` is not authorized to resume this session']);
+      expect(session.resumePausedSession).not.toHaveBeenCalled();
+    });
+
+    test('still refuses a different user in the same thread', async () => {
+      await handleMessage(client, session, makePost('continue'), botB, options);
+      await handleMessage(
+        client,
+        session,
+        makePost('continue'),
+        { id: 'user3', username: 'bot-c', displayName: 'Bot C' },
+        options,
+      );
+
+      expect(postedMessages()).toEqual([
+        '⚠️ `bot-b` is not authorized to resume this session',
+        '⚠️ `bot-c` is not authorized to resume this session',
+      ]);
+    });
+  });
 });

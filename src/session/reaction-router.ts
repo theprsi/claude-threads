@@ -42,6 +42,7 @@ import * as commands from '../operations/commands/index.js';
 import * as worktreeModule from '../operations/worktree/index.js';
 import * as contextPrompt from '../operations/context-prompt/index.js';
 import { createLogger } from '../utils/logger.js';
+import { shouldPostResumeRefusal } from '../utils/loop-safety.js';
 
 const log = createLogger('manager');
 
@@ -168,9 +169,13 @@ async function tryResumeFromReaction(
       ? sessionAllowedUsers.has(username)
       : isAuthorizedForSession({ username, platform, sessionAllowedUsers }));
   if (!platform || !resumeAuthorized) {
-    if (platform) {
+    // Loop safety (#491): the refusal names the user in code formatting rather
+    // than as an @mention (a "stop talking to me" message must not notify its
+    // recipient), and is posted at most once per (thread, user) per window.
+    if (platform && shouldPostResumeRefusal(persistedSession.threadId, username)) {
+      const fmt = platform.getFormatter();
       await platform.createPost(
-        `⚠️ @${username} is not authorized to resume this session`,
+        `⚠️ ${fmt.formatCode(username)} is not authorized to resume this session`,
         persistedSession.threadId,
       );
     }
