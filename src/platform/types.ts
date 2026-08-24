@@ -13,6 +13,10 @@ export interface PlatformUser {
   username: string;     // Login username (e.g., 'alice.smith')
   displayName?: string; // Human-friendly name (e.g., 'Alice Smith')
   email?: string;       // Optional email
+  // Whether the account is a bot/app rather than a person. Both platform
+  // clients normalize this to a strict boolean; it is optional only because
+  // a PlatformUser can be constructed on paths that never saw the raw user.
+  isBot?: boolean;
 }
 
 /**

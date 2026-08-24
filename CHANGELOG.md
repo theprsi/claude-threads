@@ -7,11 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- `PlatformUser` now carries `isBot`, normalized to a strict boolean by both the Mattermost and Slack clients (Mattermost omits `is_bot` on ordinary accounts, so an absent flag means "human", not "unknown"). Used by the #491 status-post guard; additive and optional, so existing callers are unaffected.
+
 ### Fixed
 - **Bot-to-bot refusal loop (#491).** In a channel with more than one claude-threads bot, the "not authorized to resume this session" refusal @-mentioned the very user it was refusing — so a refusal aimed at another bot woke that bot, which replied, which triggered another refusal. Three guards close the loop:
   - The refusal (and its shorter `is not authorized` sibling, on both the message and the reaction resume paths) now names the user in inline code instead of as an @mention. It reads the same to a human and notifies nobody.
   - The resume refusal is posted at most once per (thread, user) per 10 minutes instead of once per message, so a loop firing seconds apart goes quiet while a human who wanders back later is still told why nothing happened. State is in-memory only — a restart forgetting refusal timestamps is harmless.
-  - claude-threads' own status posts (`is not authorized`, `Too busy`, `Session cancelled`, `EMERGENCY SHUTDOWN`, `Session timed out`, `Only authorized users can use`) no longer wake a session at all. Matching is against the whole status template, not the leading emoji: a human message that merely starts with ⚠️, or one quoting a status post to ask about it, still gets through.
+  - claude-threads' own status posts (`is not authorized`, `Too busy`, `Session cancelled`, `EMERGENCY SHUTDOWN`, `Session timed out`, `Only authorized users can use`) no longer wake a session at all. Two conditions must both hold: the message matches a whole status template (not merely the leading emoji), and the author is not a known human. So a human message that merely starts with ⚠️, one quoting a status post to ask about it, and one pasting a status post verbatim all still get through.
 
 ## [1.28.0] - 2026-08-21
 

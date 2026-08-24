@@ -117,6 +117,7 @@ export class SlackClient extends BasePlatformClient {
       username: slackUser.name,
       displayName,
       email: slackUser.profile?.email,
+      isBot: slackUser.is_bot === true,
     };
   }
 

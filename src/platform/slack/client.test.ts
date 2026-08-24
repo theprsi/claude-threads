@@ -383,6 +383,24 @@ describe('SlackClient API methods', () => {
     expect(calls).toBe(1);
   });
 
+
+  it('getUser normalizes is_bot to a strict boolean (#491)', async () => {
+    // An absent is_bot must normalize to false, not undefined — the
+    // loop-safety guard reads "false" as "known human".
+    const c = makeClient();
+    fetchResponder = (url) => {
+      if (url.includes('users.info?user=U-BOT')) {
+        return ok({ user: { id: 'U-BOT', name: 'other-bot', profile: {}, is_bot: true } });
+      }
+      if (url.includes('users.info?user=U-HUMAN')) {
+        return ok({ user: { id: 'U-HUMAN', name: 'alice', profile: {} } });
+      }
+      return ok();
+    };
+    expect((await c.getUser('U-BOT'))?.isBot).toBe(true);
+    expect((await c.getUser('U-HUMAN'))?.isBot).toBe(false);
+  });
+
   it('getUser returns null when userId is empty', async () => {
     expect(await makeClient().getUser('')).toBeNull();
   });

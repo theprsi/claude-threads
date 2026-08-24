@@ -45,6 +45,7 @@ export interface MattermostUser {
   first_name: string;
   last_name: string;
   nickname: string;
+  is_bot?: boolean;
 }
 
 export interface PostedEventData {

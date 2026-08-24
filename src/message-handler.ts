@@ -88,7 +88,13 @@ export async function handleMessage(
   // Loop safety (#491): claude-threads' own status posts are machine output,
   // never a request. Treating one as a wake-up is how two bots in the same
   // channel end up talking to each other indefinitely.
-  if (isBotStatusPost(post.message)) return;
+  //
+  // The author check is the second condition: a person who pastes a status post
+  // verbatim to ask about it is asking a question, so a *known human* is never
+  // dropped. It is `!== false` rather than `=== true` on purpose — when the
+  // author cannot be identified at all the loop hazard wins, since dropping a
+  // machine-shaped message costs one post and letting it through costs a loop.
+  if (isBotStatusPost(post.message) && user?.isBot !== false) return;
 
   const { platformId, logger, onKill } = options;
   const dcm = resolveDirectChannelMode(options.directChannelMode);

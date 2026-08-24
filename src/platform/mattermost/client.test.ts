@@ -354,6 +354,25 @@ describe('MattermostClient HTTP methods', () => {
     expect(calls).toBe(1);
   });
 
+
+  it('getUser normalizes is_bot to a strict boolean (#491)', async () => {
+    // Mattermost omits is_bot on ordinary accounts, so an absent flag must
+    // normalize to false — the loop-safety guard reads "false" as "known
+    // human" and lets those messages through.
+    const c = makeClient();
+    fetchResponder = (url) => {
+      if (url.includes('/users/u-bot')) {
+        return jsonResponse({ id: 'u-bot', username: 'other-bot', email: '', first_name: '', is_bot: true });
+      }
+      if (url.includes('/users/u-human')) {
+        return jsonResponse({ id: 'u-human', username: 'alice', email: '', first_name: '' });
+      }
+      return jsonResponse({});
+    };
+    expect((await c.getUser('u-bot'))?.isBot).toBe(true);
+    expect((await c.getUser('u-human'))?.isBot).toBe(false);
+  });
+
   it('getUser returns null on 404', async () => {
     const c = makeClient();
     fetchResponder = () => errorResponse(404);

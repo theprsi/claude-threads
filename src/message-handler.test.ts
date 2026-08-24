@@ -2249,8 +2249,8 @@ describe('loop safety (#491)', () => {
   let session: ReturnType<typeof createMockSessionManager>;
   let options: MessageHandlerOptions;
 
-  const human: PlatformUser = { id: 'user1', username: 'allowed-user', displayName: 'User' };
-  const botB: PlatformUser = { id: 'user2', username: 'bot-b', displayName: 'Bot B' };
+  const human: PlatformUser = { id: 'user1', username: 'allowed-user', displayName: 'User', isBot: false };
+  const botB: PlatformUser = { id: 'user2', username: 'bot-b', displayName: 'Bot B', isBot: true };
 
   function makePost(message: string, rootId = 'thread1'): PlatformPost {
     return {
@@ -2325,6 +2325,33 @@ describe('loop safety (#491)', () => {
       expect(session.sendFollowUp).toHaveBeenCalledWith(
         'thread1', message, undefined, 'allowed-user', 'User',
       );
+    });
+
+    test('a human pasting a status post verbatim still gets through', async () => {
+      // The author check is the second condition on the guard: a person asking
+      // about a notice must never be silently dropped, however machine-shaped
+      // the text they pasted is.
+      const message = '⚠️ `bot-b` is not authorized to resume this session';
+
+      await handleMessage(client, session, makePost(message), human, options);
+
+      expect(session.sendFollowUp).toHaveBeenCalledWith(
+        'thread1', message, undefined, 'allowed-user', 'User',
+      );
+    });
+
+    test('drops a status post whose author cannot be identified', async () => {
+      // No PlatformUser means no way to tell a bot from a person, and the loop
+      // hazard is the more expensive of the two mistakes.
+      await handleMessage(
+        client,
+        session,
+        makePost('⚠️ `bot-b` is not authorized to resume this session'),
+        null,
+        options,
+      );
+
+      expect(session.sendFollowUp).not.toHaveBeenCalled();
     });
   });
 

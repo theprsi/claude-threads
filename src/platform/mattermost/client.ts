@@ -82,6 +82,9 @@ export class MattermostClient extends BasePlatformClient {
       username: mattermostUser.username,
       displayName,
       email: mattermostUser.email,
+      // Mattermost omits is_bot on ordinary accounts, so normalize to a strict
+      // boolean — "false" has to mean "known human", not "not asked".
+      isBot: mattermostUser.is_bot === true,
     };
   }
 
